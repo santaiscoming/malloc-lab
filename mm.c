@@ -117,9 +117,9 @@ team_t team = {
 
 // --------------------- global variable ---------------------
 /*
-  @ heap_listp - 힙의 시작점을 가리키는 포인터
+  @ free_list_p -> 가용블록을 추적하기 위한 포인터
 */
-static char *heap_listp;
+static char *free_list_p;
 // -----------------------------------------------------------
 
 /*********************************************************
@@ -130,21 +130,73 @@ static char *heap_listp;
  * mm_init - initialize the malloc package.
  * @ 초기 힙 생성
  */
-int mm_init(void) { return 0; }
+int mm_init(void) {
+  /*
+    8워드 크기의 힙 생성
+    implicit과 다르게 가용블록만 추적
+    ps.
+        가용블록을 추적하는 이유는 가용블록을 찾기위해 모든 블록을 순회할 필요가
+        없기때문 반대로 말하면 implicit는 모든 블록을 순회해야함
+  */
+  if ((free_list_p = mem_sbrk(8 * WSIZE)) == (void *)-1) return -1;
+
+  PUT(free_list_p, 0);                                /* Alignment padding */
+  PUT(free_list_p + (1 * WSIZE), PACK(DSIZE, 1));     /* Prologue */
+  PUT(free_list_p + (2 * WSIZE), PACK(DSIZE, 1));     /* Prologue */
+  PUT(free_list_p + (3 * WSIZE), PACK(4 * WSIZE, 0)); /* 첫 가용 블록 Header */
+  PUT(free_list_p + (4 * WSIZE), NULL);               /* pred */
+  PUT(free_list_p + (5 * WSIZE), NULL);               /* succ */
+  PUT(free_list_p + (6 * WSIZE), PACK(4 * WSIZE, 0)); /* 첫 가용 블록 Footer */
+  PUT(free_list_p + (7 * WSIZE), PACK(0, 1));         /* Epilogue */
+
+  /* 가용 블록을 가르키는 포인터을 에필로그만큼 옮겨줌 */
+  free_list_p += (4 * WSIZE);
+
+  /* 힙을 CHUNKSIZE bytes로 확장 */
+  if (extend_heap((CHUNKSIZE / WSIZE) - 2 * DSIZE) == NULL) return -1;
+
+  return 0;
+}
 
 /*
  * mm_malloc - Allocate a block by incrementing the brk pointer.
  *     Always allocate a block whose size is a multiple of the alignment.
  */
 void *mm_malloc(size_t size) {
-  int newsize = ALIGN(size + SIZE_T_SIZE);
-  void *p = mem_sbrk(newsize);
-  if (p == (void *)-1)
-    return NULL;
-  else {
-    *(size_t *)p = size;
-    return (void *)((char *)p + SIZE_T_SIZE);
+  if (size == 0) return NULL;
+  /*
+    @ asize : 할당될 사이즈
+    @ extendsize : 현재 블록보다 클 경우 늘려줄 사이즈 (맞는 fit이 없음)
+    @ bp : 블록의 시작 주소
+  */
+  size_t asize;
+  size_t extendsize;
+  char *bp;
+
+  /*
+    @ 정렬을 위한 블록 할당
+    if -> 16바이트 이하일 경우 16바이트로 할당
+    else -> 더블워드의 배수로 설정하기 위함
+  */
+  if (size <= DSIZE) {
+    asize = 2 * DSIZE;
+  } else {  // 더블워드의 배수로 설정하기 위함
+    asize = ALIGN(size + SIZE_T_SIZE);
   }
+
+  /* fit에 맞는 가용 블록 찾기 */
+  bp = find_fit(asize);
+  if (bp) {
+    place(bp, asize);
+    return bp;
+  }
+  /* 맞는 fit이 없을떄 더 큰 메모리를 요청하고 거기에 블록을 할당 */
+  extendsize = MAX(asize, CHUNKSIZE);
+  bp = extend_heap(extendsize / WSIZE);
+  if (!bp) return NULL; /* 더이상 블록 할당이 불가 */
+  place(bp, asize);
+
+  return bp;
 }
 
 /*
@@ -167,4 +219,24 @@ void *mm_realloc(void *ptr, size_t size) {
   memcpy(newptr, oldptr, copySize);
   mm_free(oldptr);
   return newptr;
+}
+
+/* First-fit */
+static void *find_fit(size_t asize) {
+  if (asize == 0 || !free_list_p) return NULL;
+
+  /* @ bp -> 가용 블록의 첫번째 */
+  void *bp = free_list_p;
+
+  /*
+    while : 다음 가용 블록이 있는동안
+      if : 적합한 사이즈의 블록을 찾으면 해당 블록 포인터 반환
+      else : 다음 가용 블록(succ)으로 이동
+  */
+  while (!!bp) {
+    if ((asize <= GET_SIZE(HDRP(bp)))) return bp;
+
+    bp = GET_SUCC(bp);
+  }
+  return NULL;
 }
