@@ -7,7 +7,7 @@ extern void *mm_realloc(void *ptr, size_t size);
 
 // --------------------- my prototype ---------------------
 static void *extend_heap(size_t words);
-static void *find_fit(size_t asize);
+static void *find_fit(size_t asize, int num);
 static void *coalesce(void *bp);
 static void place(void *bp, size_t asize);
 static void *extend_heap(size_t words);
