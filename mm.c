@@ -36,9 +36,11 @@ team_t team = {
 /*
   ------------------- 매크로 설명 -------------------
   @ void *bp -> 블록포인터 즉, malloc으로 할당받은 블록의 시작주소를 의미
+  @ CHUNKSIZE (1 << 12) -> 힙을 늘릴때 늘려줄 크기
+
   @ ALIGNMENT -> 8바이트(DOUBLE WORD) 정렬을 위해
   @ ALIGN(size) -> size를 8바이트 정렬로 변경
-  @ SIZE_T_SIZE -> size_t의 크기를 8바이트로 변경
+  @ SIZE_T_SIZE -> size_t의 ALIGN macro를 사용해 크기를 8바이트로 변경
   @ PACK(size, alloc) -> size와 alloc을 하나로 합침 (size : 29bit, alloc : 1bit)
     ex) size = 0x0000000c, alloc = 0x1 -> 0x0000000d
 
@@ -133,8 +135,12 @@ static char *prev_bp;
 
 /*
  * mm_init - initialize the malloc package.
+<<<<<<< HEAD
  * prologue - 헤더와 푸터로만 구성된 8바이트(DSIZE) 블록
  * epilogue - 헤더와 푸터로만 구성 (사이즈 0)
+=======
+ * @ 초기 힙 생성
+>>>>>>> origin/main
  */
 int mm_init(void) {
   /*Create the initial empty heap */
