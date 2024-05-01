@@ -81,6 +81,7 @@ team_t team = {
 
   -------------------------------------------------
 */
+
 /* single word (4) or double word (8) alignment */
 #define ALIGNMENT 8
 
@@ -113,14 +114,32 @@ team_t team = {
 /* Given block ptr bp, compute address of next and previous blocks */
 #define NEXT_BLKP(bp) ((char *)(bp) + GET_SIZE(((char *)(bp)-WSIZE)))
 #define PREV_BLKP(bp) ((char *)(bp)-GET_SIZE(((char *)(bp)-DSIZE)))
+
+/*
+  For explicit-list
+  @ GET_SUCC(bp) -> bp의 "다음 가용 블록"을 가르키는 포인터
+  @ GET_PRED(bp) -> bp의 "이전 가용 블록"을 가르키는 포인터
+*/
+#define GET_PRED(bp) (*(char **)(bp))
+#define GET_SUCC(bp) (*(char **)(bp + WSIZE))
+
 // --------------------------------------------------------------
 
-// --------------------- global variable ---------------------
+// --------------------- function prototype ---------------------
+static void place(void *bp, size_t asize);
+static void *extend_heap(size_t words);
+static void *coalesce(void *bp);
+static void *find_fit(size_t asize);
+static void remove_free_block(void *bp);
+static void add_free_block(void *bp);
+// --------------------------------------------------------------
+
+// ---------------------- global variable -----------------------
 /*
   @ free_list_p -> 가용블록을 추적하기 위한 포인터
 */
 static char *free_list_p;
-// -----------------------------------------------------------
+// --------------------------------------------------------------
 
 /*********************************************************
  *              explicit-list (using LIFO)
@@ -175,8 +194,8 @@ void *mm_malloc(size_t size) {
 
   /*
     @ 정렬을 위한 블록 할당
-    if -> 16바이트 이하일 경우 16바이트로 할당
-    else -> 더블워드의 배수로 설정하기 위함
+      if -> 16바이트 이하일 경우 16바이트로 할당
+      else -> 더블워드의 배수로 설정하기 위함
   */
   if (size <= DSIZE) {
     asize = 2 * DSIZE;
@@ -190,9 +209,11 @@ void *mm_malloc(size_t size) {
     place(bp, asize);
     return bp;
   }
+
   /* 맞는 fit이 없을떄 더 큰 메모리를 요청하고 거기에 블록을 할당 */
   extendsize = MAX(asize, CHUNKSIZE);
   bp = extend_heap(extendsize / WSIZE);
+
   if (!bp) return NULL; /* 더이상 블록 할당이 불가 */
   place(bp, asize);
 
@@ -202,7 +223,14 @@ void *mm_malloc(size_t size) {
 /*
  * mm_free - Freeing a block does nothing.
  */
-void mm_free(void *ptr) {}
+void mm_free(void *bp) {
+  size_t size = GET_SIZE(HDRP(bp));
+
+  PUT(HDRP(bp), PACK(size, 0));
+  PUT(FTRP(bp), PACK(size, 0));
+
+  coalesce(bp);
+}
 
 /*
  * mm_realloc - Implemented simply in terms of mm_malloc and mm_free
@@ -214,11 +242,110 @@ void *mm_realloc(void *ptr, size_t size) {
 
   newptr = mm_malloc(size);
   if (newptr == NULL) return NULL;
-  copySize = *(size_t *)((char *)oldptr - SIZE_T_SIZE);
+
+  copySize = GET_SIZE(HDRP(oldptr));
   if (size < copySize) copySize = size;
+  // oldptr에서 newptr로 copySize 바이트를 복사
   memcpy(newptr, oldptr, copySize);
   mm_free(oldptr);
+
   return newptr;
+}
+
+/*
+  heap 영역을 늘림
+
+*/
+static void *extend_heap(size_t words) {
+  char *bp;
+  size_t size;
+  char *next_bp;
+
+  /* Allocate an even number of words to maintain alignment */
+  size = (words % 2) ? (words + 1) * WSIZE : words * WSIZE;
+
+  if ((long)(bp = mem_sbrk(size)) == -1) return NULL;
+  /* Initialize free block header/footer and the epilogue header */
+  PUT(HDRP(bp), PACK(size, 0));         /* Free block header */
+  PUT(FTRP(bp), PACK(size, 0));         /* Free block footer */
+  PUT(HDRP(NEXT_BLKP(bp)), PACK(0, 1)); /* New epilogue header */
+  /* Coalesce if the previous block was free */
+  return coalesce(bp);
+}
+
+/* 가용 블록 리스트 연결 */
+static void *coalesce(void *bp) {
+  size_t prev_alloc = GET_ALLOC(FTRP(PREV_BLKP(bp)));  // 이전 블록 할당 상태
+  size_t next_alloc = GET_ALLOC(HDRP(NEXT_BLKP(bp)));  // 다음 블록 할당 상태
+  size_t size = GET_SIZE(HDRP(bp));  // 현재 블록 사이즈
+
+  /*
+    [case 1] : 앞 뒤 모두 할당된 경우
+      free_list에 추가후 넘겨받은 bp return
+  */
+  if (prev_alloc && next_alloc) {
+    add_free_block(bp);
+
+    return bp;
+  }
+
+  /*
+    [case 2] : 다음 블록만 빈 경우
+
+  */
+  else if (prev_alloc && !next_alloc) {
+    splice_free_block(NEXT_BLKP(bp));  // 가용 블록을 free_list에서 제거
+    size += GET_SIZE(HDRP(NEXT_BLKP(bp)));
+    PUT(HDRP(bp), PACK(size, 0));  // 현재 블록 헤더 재설정
+    // 다음 블록 푸터 재설정
+    //(위에서 헤더를 재설정했으므로, FTRP(bp)는 합쳐질 다음 블록의 푸터가 됨)
+    PUT(FTRP(bp), PACK(size, 0));
+  }
+
+  // 이전 블록만 빈 경우
+  else if (!prev_alloc && next_alloc) {
+    splice_free_block(PREV_BLKP(bp));  // 가용 블록을 free_list에서 제거
+    size += GET_SIZE(HDRP(PREV_BLKP(bp)));
+    PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));  // 이전 블록 헤더 재설정
+    PUT(FTRP(bp), PACK(size, 0));             // 현재 블록 푸터 재설정
+    bp = PREV_BLKP(bp);  // 이전 블록의 시작점으로 포인터 변경
+  }
+
+  // 이전 블록과 다음 블록 모두 빈 경우
+  else {
+    splice_free_block(PREV_BLKP(bp));  // 이전 가용 블록을 free_list에서 제거
+    splice_free_block(NEXT_BLKP(bp));  // 다음 가용 블록을 free_list에서 제거
+    size += GET_SIZE(HDRP(PREV_BLKP(bp))) + GET_SIZE(FTRP(NEXT_BLKP(bp)));
+    PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));  // 이전 블록 헤더 재설정
+    PUT(FTRP(NEXT_BLKP(bp)), PACK(size, 0));  // 다음 블록 푸터 재설정
+    bp = PREV_BLKP(bp);  // 이전 블록의 시작점으로 포인터 변경
+  }
+  add_free_block(bp);  // 현재 병합한 가용 블록을 free_list에 추가
+  return bp;           // 병합한 가용 블록의 포인터 반환
+}
+
+/*
+  @ 가용 블록에 할당하는 함수
+    first-fit으로 찾은 가용 블록에 할당
+*/
+static void place(void *bp, size_t asize) {
+  remove_free_block(bp); /* Free-Block_List 찾은 가용 블록 제거 */
+
+  size_t cur_block_size = GET_SIZE(HDRP(bp));  // 현재 블록의 크기
+
+  // 차이가 최소 블록 크기 16보다 같거나 크면 분할
+  if ((cur_block_size - asize) >= (2 * DSIZE)) {
+    // 현재 블록에는 필요한 만큼만 할당
+    PUT(HDRP(bp), PACK(asize, 1));
+    PUT(FTRP(bp), PACK(asize, 1));
+    // 남은 크기를 다음 블록에 할당(가용 블록)
+    PUT(HDRP(NEXT_BLKP(bp)), PACK((cur_block_size - asize), 0));
+    PUT(FTRP(NEXT_BLKP(bp)), PACK((cur_block_size - asize), 0));
+    add_free_block(NEXT_BLKP(bp));  // 남은 블록을 free_list에 추가
+  } else {
+    PUT(HDRP(bp), PACK(cur_block_size, 1));  // 해당 블록 전부 사용
+    PUT(FTRP(bp), PACK(cur_block_size, 1));
+  }
 }
 
 /* First-fit */
@@ -233,10 +360,36 @@ static void *find_fit(size_t asize) {
       if : 적합한 사이즈의 블록을 찾으면 해당 블록 포인터 반환
       else : 다음 가용 블록(succ)으로 이동
   */
-  while (!!bp) {
+  while (bp) {
     if ((asize <= GET_SIZE(HDRP(bp)))) return bp;
 
     bp = GET_SUCC(bp);
   }
   return NULL;
+}
+
+// 가용 리스트에서 bp에 해당하는 블록을 제거하는 함수
+static void remove_free_block(void *bp) {
+  // 분리하려는 블록이 free_list 맨 앞에 있는 블록이면
+  // (이전 블록이 없음)
+  if (bp == free_list_p) {
+    free_list_p = GET_SUCC(free_list_p);  // 다음 블록을 루트로 변경
+    return;
+  }
+  // 이전 블록의 SUCC을 다음 가용 블록으로 연결
+  GET_SUCC(GET_PRED(bp)) = GET_SUCC(bp);
+  // 다음 블록의 PRED를 이전 블록으로 변경
+  // 다음 가용 블록이 있을 경우만
+  if (GET_SUCC(bp) != NULL) GET_PRED(GET_SUCC(bp)) = GET_PRED(bp);
+}
+
+// 가용 리스트의 맨 앞에 현재 블록을 추가하는 함수
+static void add_free_block(void *bp) {
+  GET_SUCC(bp) = free_list_p;  // bp의 SUCC은 루트가 가리키던 블록
+
+  // free list에 블록이 존재했을 경우만
+  // 루트였던 블록의 PRED를 추가된 블록으로 연결
+  if (free_list_p != NULL) GET_PRED(free_list_p) = bp;
+
+  free_list_p = bp;  // 루트를 현재 블록으로 변경
 }
